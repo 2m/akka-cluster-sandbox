@@ -1,12 +1,8 @@
-import com.typesafe.config.ConfigFactory
-import akka.actor.ActorSystem
-import akka.contrib.pattern.ClusterSharding
-import akka.actor.Props
-import akka.actor.ActorLogging
-import akka.actor.Actor
-import akka.cluster.Cluster
-import akka.contrib.pattern.ShardRegion
+import akka.actor._
+import akka.cluster._
+import akka.cluster.sharding._
 import akka.persistence.AtLeastOnceDelivery
+import com.typesafe.config.ConfigFactory
 
 object ShardedAtLeastOnceDelivery extends App {
 
@@ -27,10 +23,17 @@ object ShardedAtLeastOnceDelivery extends App {
 
   class ShardForwarder extends Actor with ActorLogging with AtLeastOnceDelivery {
     val path = ClusterSharding(context.system).shardRegion("printer").path
-    def receive = {
-      case "tick" => deliver(path, Msg)
+    override def receive = {
+      case "tick" => deliver(path)(Msg)
       case Ack(id) => confirmDelivery(id)
     }
+
+    // Members declared in akka.persistence.Eventsourced
+    def receiveCommand: PartialFunction[Any,Unit] = ???
+    def receiveRecover: PartialFunction[Any,Unit] = ???
+
+    // Members declared in akka.persistence.PersistenceIdentity
+    def persistenceId: String = ???
   }
 
   val remoteConfig = ConfigFactory.parseString("""
@@ -72,19 +75,20 @@ object ShardedAtLeastOnceDelivery extends App {
 
   val system = ActorSystem("ShardedAtLeastOnceDelivery", moreConfig.withFallback(clusterConfig))
 
-  val idExtractor: ShardRegion.IdExtractor = {
+  val idExtractor: ShardRegion.ExtractEntityId = {
     case msg ⇒ (msg.hashCode.toString, msg)
   }
 
-  val shardResolver: ShardRegion.ShardResolver = msg ⇒ msg match {
+  val shardResolver: ShardRegion.ExtractShardId = msg ⇒ msg match {
     case msg ⇒ (msg.hashCode % 12).toString
   }
 
   val region = ClusterSharding(system).start(
     typeName = "printer",
-    entryProps = Some(Props[Printer]),
-    idExtractor = idExtractor,
-    shardResolver = shardResolver
+    entityProps = Props[Printer],
+    settings = ClusterShardingSettings(system),
+    extractEntityId = idExtractor,
+    extractShardId = shardResolver
   )
 
   val f = system.actorOf(Props[ShardForwarder])

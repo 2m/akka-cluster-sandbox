@@ -7,7 +7,13 @@ import akka.routing._
 import akka.util.Timeout
 import com.typesafe.config.ConfigFactory
 
-object AskClusterRouter extends App {
+import scala.concurrent.Await
+import scala.concurrent.duration._
+import scala.io.StdIn
+
+object ClusterRouterGroupWorkerRestart extends App {
+
+  case class BigMsg(array: Array[Double])
 
   class Pinger extends Actor with ActorLogging {
     def receive = {
@@ -19,10 +25,13 @@ object AskClusterRouter extends App {
 
   val remoteConfig = ConfigFactory.parseString("""
     akka {
+      log-dead-letters = on
+
       actor {
         provider = "akka.remote.RemoteActorRefProvider"
       }
       remote {
+        log-frame-size-exceeding = 1000b
         enabled-transports = ["akka.remote.netty.tcp"]
         netty.tcp {
           hostname = "127.0.0.1"
@@ -40,7 +49,7 @@ object AskClusterRouter extends App {
 
       cluster {
         seed-nodes = [
-          "akka.tcp://AskClusterRouter@127.0.0.1:2552"
+          "akka.tcp://ClusterRouterGroupWorkerRestart@127.0.0.1:2552"
         ]
         auto-down-unreachable-after = 10s
       }
@@ -54,25 +63,35 @@ object AskClusterRouter extends App {
     case _ => ConfigFactory.empty()
   }
 
-  val system = ActorSystem("AskClusterRouter", moreConfig.withFallback(clusterConfig))
+  val system = ActorSystem("ClusterRouterGroupWorkerRestart", moreConfig.withFallback(clusterConfig))
 
   args.headOption match {
     case Some("seed") =>
 
       val worker = system.actorOf(
-        ClusterRouterPool(RoundRobinPool(0), ClusterRouterPoolSettings(
-          totalInstances = 100, maxInstancesPerNode = 3,
-          allowLocalRoutees = true, useRole = None)).props(Props[Pinger]),
+        ClusterRouterGroup(
+          RoundRobinGroup(Nil),
+          ClusterRouterGroupSettings(totalInstances = 10, routeesPaths = List("/user/worker"), allowLocalRoutees = false, useRole = None)).props(),
         name = "worker")
 
+
+      println("Waiting for workers to start. Press ENTER when started.")
+      StdIn.readLine()
+
       import system.dispatcher
-      import scala.concurrent.duration._
       implicit val timeout = Timeout(1.second)
       system.scheduler.schedule(0.seconds, 1.second) {
-        val fut = worker ? "in anybody out there"
+        val fut = worker ? BigMsg(Array.fill(2000)(scala.math.random))
         fut.foreach(println)
       }
+
+      StdIn.readLine()
+      Await.ready(system.terminate(), 10.seconds)
     case _ =>
+      system.actorOf(Props[Pinger], "worker")
+
+      StdIn.readLine()
+      Await.ready(system.terminate(), 10.seconds)
   }
 
 }
